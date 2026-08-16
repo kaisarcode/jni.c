@@ -32,7 +32,6 @@ involved. The bridge is local to the process.
 `libjni.so` registers `run` in `JNI_OnLoad` through `RegisterNatives` against
 `com/kaisarcode/kclib/KclibBridge`, binding it to the internal function
 `kcjni_native_run`. `JNI_OnUnload` releases every cached kclib handle.
-
 ## Dispatch Flow
 
 1. The app calls `KclibBridge.run(argsJson, stdin)`.
@@ -45,6 +44,24 @@ involved. The bridge is local to the process.
 6. It calls the function with the exact `argsJson` string.
 7. It returns the output string, or `error: <detail>` on any failure.
 
+## Payload Contract
+
+`argsJson` is a JSON object with the shape:
+
+```json
+{"lib":"<name>","cmd":"<command>","args":{...},"handle":0}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `lib` | kclib identifier. Names `lib<name>.so` and symbol `kc_<name>_run`. Required. |
+| `cmd` | Command name, dispatched by the kclib. |
+| `args` | JSON object with command arguments (kclib-defined schema). |
+| `handle` | Reserved for future stateful calls; `0` for stateless kclibs. |
+
+The kclib receives the exact `argsJson` string and defines its own `args` schema.
+`stdin` is reserved for future streaming and currently ignored.
+
 ## Why dladdr Instead of a Passed Directory
 
 The kclib must sit next to the bridge. `dladdr()` on a symbol of `libjni.so`
@@ -52,6 +69,7 @@ returns the absolute path used to load it, so the directory is discovered
 instead of passed. This keeps the Java contract minimal and the bridge
 position-independent: no directory argument, no environment variable, no
 hard-coded filesystem convention.
+
 
 ## Why the Payload Is Forwarded Verbatim
 
@@ -83,10 +101,11 @@ path traversal and symbol injection before any path or `dlsym` is attempted.
 
 ## Payload and Error Contract
 
-- `lib` is required and validated.
-- `cmd` and `args` are forwarded untouched.
-- `stdin` is accepted by the JNI method and ignored; the kclib run contract
-    has no stdin yet.
+- `lib` is required and validated (alphanumeric + underscore, ≤ 63 bytes).
+- `cmd`, `args` (object), and `handle` (integer, reserved, must be 0) are
+    forwarded untouched to the kclib.
+- `stdin` is accepted by the JNI method and reserved for future streaming;
+    currently ignored.
 - Success: the kclib output string is returned as a `jstring`.
 - Failure: a string beginning with `error: ` is returned. The bridge does not
     throw Java exceptions for business errors; JNI and VM-level failures are

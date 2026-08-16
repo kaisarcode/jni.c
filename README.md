@@ -25,16 +25,17 @@ public final class KclibBridge {
 `argsJson` is a JSON object:
 
 ```json
-{"lib":"grd","cmd":"split","args":["-w","1920","-H","1080","-k","row","-W","1 2 1"]}
+{"lib":"grd","cmd":"split","args":{"w":1920,"h":1080,"k":"row","W":[1,2,1]},"handle":0}
 ```
 
 | Field | Description |
 | :--- | :--- |
 | `lib` | kclib identifier. Names the shared library `lib<name>.so` and the run symbol `kc_<name>_run`. Required. |
-| `cmd` | Command name, forwarded to the kclib untouched. |
-| `args` | Command arguments, forwarded to the kclib untouched. |
+| `cmd` | Command name, dispatched by the kclib. |
+| `args` | Command arguments as a JSON object. The kclib defines the schema. |
+| `handle` | Reserved for future stateful calls. Must be `0` for stateless kclibs. |
 
-`stdin` is reserved and currently ignored by `libjni.so`.
+`stdin` is reserved for future streaming input and currently ignored by `libjni.so`.
 
 ### kclib side
 
