@@ -70,7 +70,6 @@ instead of passed. This keeps the Java contract minimal and the bridge
 position-independent: no directory argument, no environment variable, no
 hard-coded filesystem convention.
 
-
 ## Why the Payload Is Forwarded Verbatim
 
 The kclib run contract receives the exact string the app sent. The bridge
