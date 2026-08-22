@@ -2,10 +2,10 @@
 
 ## Purpose
 
-`jni.c` is the JNI loader shim of the kclib collection. It lets Android apps
-call kclib native functions through one small, fixed Java entry point without
-adding JNI to the kclibs themselves and without static-linking kclib objects
-into the shim.
+`jni.c` is the JNI loader shim of the kclib collection for Android. It lets
+Android apps call kclib native functions through one small, fixed Java entry
+point without adding JNI to the kclibs themselves and without static-linking
+kclib objects into the shim.
 
 The kclib ecosystem stays pure portable C. A kclib that wants to be reachable
 from Android exports one extra C function, `kc_<name>_run()`, and ships its
@@ -14,39 +14,51 @@ shared library. `jni.c` is the only Android-aware component in the call path.
 ## Operating Model
 
 An Android app embeds `libjni.so` and one or more `lib<name>.so` kclibs in the
-same private directory. The app declares a fixed class and calls it:
+same native library directory. The app declares a fixed class and calls it:
 
 ```java
 package com.kaisarcode.kclib;
 
 public final class KclibBridge {
-    public static native String run(String argsJson, String stdin);
+    static { System.loadLibrary("jni"); }
+    public static native String run(String payloadJson);
 }
 ```
 
 No account, subscription, hosted API, package registry, or remote service is
 involved. The bridge is local to the process.
 
-## Bridge
+## Bridge Architecture
 
-`libjni.so` registers `run` in `JNI_OnLoad` through `RegisterNatives` against
-`com/kaisarcode/kclib/KclibBridge`, binding it to the internal function
-`kcjni_native_run`. `JNI_OnUnload` releases every cached kclib handle.
+The bridge follows the same canonical pattern as `wvw.c`:
+
+1. JavaScript calls `NativeBridge.invoke("runKclib", payload)`.
+2. The injected JavaScript calls `KclibBridge.run(JSON.stringify(message))`.
+3. `kcjni_native_run` extracts and validates the `"lib"` field.
+4. The whitelist is checked against the manifest metadata.
+5. `dladdr()` locates `libjni.so` itself; the kclib directory is derived.
+6. The bridge opens `<dir>/lib<name>.so` with `dlopen(RTLD_NOW | RTLD_LOCAL)`.
+7. It resolves `kc_<name>_run` with `dlsym()`.
+8. It calls the function with the exact `argsJson` string.
+9. It returns a structured JSON response.
+
 ## Dispatch Flow
 
-1. The app calls `KclibBridge.run(argsJson, stdin)`.
-2. `kcjni_native_run` extracts and validates the `"lib"` field of `argsJson`.
-3. `dladdr()` on a function of `libjni.so` yields the absolute path used to
-    load the bridge; its directory is taken as the kclib directory.
-4. The bridge opens `<dir>/lib<name>.so` with `dlopen(RTLD_NOW | RTLD_LOCAL)`,
+1. The app calls `KclibBridge.run(payloadJson)`.
+2. `kcjni_native_run` parses the JSON payload with Parson.
+3. The `"lib"` field is extracted and validated (`[A-Za-z0-9_]+`, max 63 bytes).
+4. The name is checked against the whitelist loaded from manifest metadata.
+5. `dladdr()` on `kcjni_native_run` yields the absolute path; the directory is
+    taken as the kclib directory.
+6. The bridge opens `<dir>/lib<name>.so` with `dlopen(RTLD_NOW | RTLD_LOCAL)`,
     caching the handle per name.
-5. It resolves `kc_<name>_run` with `dlsym()`.
-6. It calls the function with the exact `argsJson` string.
-7. It returns the output string, or `error: <detail>` on any failure.
+7. It resolves `kc_<name>_run` with `dlsym()`.
+8. It calls the function with the exact `argsJson` string.
+9. It returns `{"ok":true,"result":...}` or `{"ok":false,"error":{...}}`.
 
 ## Payload Contract
 
-`argsJson` is a JSON object with the shape:
+`payloadJson` is a JSON object with the shape:
 
 ```json
 {"lib":"<name>","cmd":"<command>","args":{...},"handle":0}
@@ -59,12 +71,46 @@ involved. The bridge is local to the process.
 | `args` | JSON object with command arguments (kclib-defined schema). |
 | `handle` | Reserved for future stateful calls; `0` for stateless kclibs. |
 
-The kclib receives the exact `argsJson` string and defines its own `args` schema.
-`stdin` is reserved for future streaming and currently ignored.
+The kclib receives the exact `payloadJson` string and defines its own `args`
+schema.
+
+## Response Contract
+
+Success:
+
+```json
+{"ok":true,"result":<kclib output>}
+```
+
+Error:
+
+```json
+{"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+Error codes:
+
+| Code | Meaning |
+| :--- | :--- |
+| `INVALID_ARGUMENT` | Missing or invalid `lib` field, or malformed JSON. |
+| `KCLIB_NOT_ALLOWED` | The kclib name is not in the application whitelist. |
+| `KCLIB_FAILED` | The kclib runner returned an error or the library could not be loaded. |
+
+## Whitelist
+
+The allowed kclib names are declared in `AndroidManifest.xml` as
+`<meta-data android:name="com.kaisarcode.kclib.allowed_kclibs"
+android:value="..."/>`. The bridge reads this at load time via JNI using
+`ActivityThread.currentActivityThread().getApplication()` ->
+`PackageManager.getApplicationInfo()` -> `Bundle.getString()`.
+
+When the whitelist is empty or absent, all kclibs are allowed. Names are
+validated as `[A-Za-z0-9_]+` and at most 63 bytes before any path or `dlsym`
+is attempted.
 
 ## Why dladdr Instead of a Passed Directory
 
-The kclib must sit next to the bridge. `dladdr()` on a symbol of `libjni.so`
+The kclib must sit next to the bridge. `dladdr()` on `kcjni_native_run`
 returns the absolute path used to load it, so the directory is discovered
 instead of passed. This keeps the Java contract minimal and the bridge
 position-independent: no directory argument, no environment variable, no
@@ -87,10 +133,9 @@ rebuilding.
 
 ## Handle Cache
 
-Handles are cached in a fixed-size array (`KCJNI_LIBS_MAX`), keyed by the
-validated kclib name. A cached handle is reused on later calls. All handles
-are closed in `JNI_OnUnload`. There is no dynamic registry and no reference
-counting.
+Handles are cached in a dynamically grown array, keyed by the validated kclib
+name. A cached handle is reused on later calls. All handles are closed in
+`JNI_OnUnload`. There is no reference counting.
 
 ## Lib Name Validation
 
@@ -98,44 +143,32 @@ The `"lib"` field must match `[A-Za-z0-9_]+` and be at most 63 bytes. It is
 used to build both a filesystem path and a symbol name, so the check prevents
 path traversal and symbol injection before any path or `dlsym` is attempted.
 
-## Payload and Error Contract
+## Security
 
-- `lib` is required and validated (alphanumeric + underscore, ≤ 63 bytes).
-- `cmd`, `args` (object), and `handle` (integer, reserved, must be 0) are
-    forwarded untouched to the kclib.
-- `stdin` is accepted by the JNI method and reserved for future streaming;
-    currently ignored.
-- Success: the kclib output string is returned as a `jstring`.
-- Failure: a string beginning with `error: ` is returned. The bridge does not
-    throw Java exceptions for business errors; JNI and VM-level failures are
-    left to the runtime.
+- Strict lib-name validation prevents path and symbol injection.
+- JSON extraction fails on malformed or oversized input.
+- `dlopen` uses `RTLD_NOW | RTLD_LOCAL`.
+- The whitelist is read once from the manifest and enforced on every call.
+- No hidden state, background work, or network access.
 
 ## Resource Model
 
 - Bounded buffers for names, paths, symbols, and error messages.
-- JSON extraction fails on malformed, missing, or oversized input.
-- malloc'd strings returned by kclib run functions are always freed by the
-    bridge.
-- No threads, no background work, no global state beyond the handle cache.
-
-## Android Linker Namespace Note
-
-`dlopen()` of a kclib from a private app directory may be subject to Android
-linker namespace restrictions depending on API level and how the app's native
-libraries were loaded. This must be validated during integration with the
-embedding app; if it fails, the app must ensure the kclib directory is visible
-to the namespace the bridge runs in. The bridge itself does not depend on a
-specific namespace policy beyond standard `dlopen` behavior.
+- JSON parsing uses Parson (vendored, MIT licensed).
+- malloc'd strings returned by kclib run functions are always freed.
+- No threads, no background work, no global state beyond the handle cache
+    and the whitelist.
 
 ## Inspectability
 
 The complete path is short and visible:
 
 1. The app passes one JSON payload.
-2. The bridge extracts `"lib"` and validates it.
-3. The kclib path is derived from the bridge's own loaded path.
-4. The kclib is opened, its run symbol resolved, and called.
-5. The output or an `error: ` string is returned.
+2. The bridge parses it and extracts `"lib"`.
+3. The whitelist is checked.
+4. The kclib path is derived from the bridge's own loaded path.
+5. The kclib is opened, its run symbol resolved, and called.
+6. A structured JSON response is returned.
 
 ## Non-Goals
 
@@ -163,9 +196,9 @@ unfinished product roadmap.
 - The bridge never links a kclib; discovery and dispatch happen at runtime.
 - The lib name is validated before any path or symbol is built.
 - The payload reaches the kclib verbatim.
-- Loaded handles are cached in a fixed array and released on unload.
-- Errors are returned as `error: ` strings, not thrown exceptions.
-- No hidden state, background work, or network access.
+- Loaded handles are cached in a dynamic array and released on unload.
+- Errors are returned as structured JSON objects, not thrown exceptions.
+- The whitelist is read from manifest metadata, not passed as parameters.
 
 These constraints keep `libjni.so` a sharp, single-purpose adapter between the
 Java boundary and the pure C kclibs.

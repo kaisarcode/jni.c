@@ -10,9 +10,11 @@ else()
     add_compile_options(/O2 /W3 /WX)
 endif()
 
-add_library(jni SHARED src/kcjni.c)
+set(JNI_SOURCES src/kcjni.c lib/parson/parson.c)
 
-target_include_directories(jni PRIVATE src)
+add_library(jni SHARED ${JNI_SOURCES})
+
+target_include_directories(jni PRIVATE src lib/parson)
 
 if(ANDROID)
     target_link_libraries(jni dl)

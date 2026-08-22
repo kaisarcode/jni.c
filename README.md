@@ -1,10 +1,14 @@
 # jni.c - JNI Bridge for kclib Native Libraries
 
-`jni.c` produces `libjni.so`, a small Android-only shared library that maps one
-JNI method, `com.kaisarcode.kclib.KclibBridge.run(String, String)`, to the
-kclib requested by name. The kclib is loaded at runtime with
-`dlopen`/`dlsym` from the same directory that holds `libjni.so`; kclib
-repositories stay pure C and never gain JNI.
+`jni.c` produces `libjni.so`, an Android-only shared library that maps one
+JNI method, `com.kaisarcode.kclib.KclibBridge.run(String)`, to the kclib
+requested by name. The kclib is loaded at runtime with `dlopen`/`dlsym` from
+the same directory that holds `libjni.so`; kclib repositories stay pure C and
+never gain JNI.
+
+The bridge follows the same canonical pattern as the `wvw.c` NativeBridge:
+structured JSON responses, Parson for JSON handling, whitelist-gated kclib
+dispatch, and the standard `kc_<name>_run` runner contract.
 
 ---
 
@@ -16,16 +20,17 @@ repositories stay pure C and never gain JNI.
 package com.kaisarcode.kclib;
 
 public final class KclibBridge {
-    public static native String run(String argsJson, String stdin);
+    static { System.loadLibrary("jni"); }
+    public static native String run(String payloadJson);
 }
 ```
 
 ### Payload
 
-`argsJson` is a JSON object:
+`payloadJson` is a JSON object forwarded verbatim to the kclib:
 
 ```json
-{"lib":"grd","cmd":"split","args":{"w":1920,"h":1080,"k":"row","W":[1,2,1]},"handle":0}
+{"lib":"grd","cmd":"split","args":{"w":1920,"h":1080,"k":"row","W":[1,2,1]}}
 ```
 
 | Field | Description |
@@ -35,7 +40,27 @@ public final class KclibBridge {
 | `args` | Command arguments as a JSON object. The kclib defines the schema. |
 | `handle` | Reserved for future stateful calls. Must be `0` for stateless kclibs. |
 
-`stdin` is reserved for future streaming input and currently ignored by `libjni.so`.
+### Response
+
+Success:
+
+```json
+{"ok":true,"result":<kclib output>}
+```
+
+Error:
+
+```json
+{"ok":false,"error":{"code":"...","message":"..."}}
+```
+
+Error codes:
+
+| Code | Meaning |
+| :--- | :--- |
+| `INVALID_ARGUMENT` | Missing or invalid `lib` field, or malformed JSON payload. |
+| `KCLIB_NOT_ALLOWED` | The kclib name is not in the application whitelist. |
+| `KCLIB_FAILED` | The kclib runner returned an error or the shared library could not be loaded. |
 
 ### kclib side
 
@@ -49,10 +74,38 @@ char *kc_<name>_run(const char *payload_json, char **out_err);
 - On success returns a malloc'd output string and sets `*out_err` to NULL.
 - On failure returns NULL and sets `*out_err` to a malloc'd message.
 
-### Result
+---
 
-A successful run returns the kclib output string. Any failure returns a string
-that starts with `error: ` followed by a short cause.
+## Whitelist
+
+The allowed kclib names are declared in `AndroidManifest.xml` as metadata:
+
+```xml
+<meta-data
+    android:name="com.kaisarcode.kclib.allowed_kclibs"
+    android:value="grd,redp2p" />
+```
+
+`libjni.so` reads this metadata at load time via JNI. When the whitelist is
+empty or the metadata is absent, all kclibs are allowed. Names are validated
+as `[A-Za-z0-9_]+` and at most 63 bytes before any path or symbol is built.
+
+---
+
+## JavaScript Interface
+
+The embedding app injects `NativeBridge` JavaScript into the WebView. The
+API matches `wvw.c`:
+
+```js
+NativeBridge.invoke("runKclib", {
+    lib: "grd",
+    cmd: "split",
+    args: { w: 1920, h: 1080, k: "row", W: [1, 2, 1] }
+})
+.then(function (result) { /* result = {boxes:[...]} */ })
+.catch(function (err) { /* err = {code:"...", message:"..."} */ });
+```
 
 ---
 
@@ -69,6 +122,12 @@ Artifacts are generated under `bin/{arch}/android/`:
 
 ```bash
 make
+```
+
+Or equivalently:
+
+```bash
+make all
 ```
 
 Produces:
@@ -95,9 +154,16 @@ make armv7/android
 
 ---
 
+## Dependencies
+
+- Parson (`lib/parson/`) is the vendored JSON library (same copy used by
+    `wvw.c`, `redp2p.c`, and `grd.c`), with its MIT `LICENSE`.
+
+---
+
 ## Beta Notice
 
-This is a beta project. It was created out of a personal need for these
+This project is a beta project. It was created out of a personal need for these
 libraries, but no guarantees are provided regarding its stability or future
 support. You are free to test it, use it, and modify it as you please.
 

@@ -54,7 +54,9 @@ endef
 
 .DEFAULT_GOAL := android
 
-.PHONY: android aarch64/android armv7/android clean
+.PHONY: all android aarch64/android armv7/android clean
+
+all: android
 
 ## Android
 
