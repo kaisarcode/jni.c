@@ -41,6 +41,7 @@ static char g_allowed_kclibs[KCJNI_KCLIBS_MAX][KCJNI_KCLIB_NAME_LEN];
 static int g_allowed_kclib_count = 0;
 static int g_whitelist_loaded = 0;
 
+
 JNIEXPORT jstring JNICALL kcjni_native_run(JNIEnv *env, jclass cls,
     jstring args_json);
 
@@ -136,141 +137,18 @@ static void parse_allowed_kclibs(const char *raw) {
 }
 
 /**
- * Reads the kclib whitelist from AndroidManifest.xml metadata via JNI.
- * @param env JNI environment.
+ * Sets the kclib whitelist from a comma-separated string.
+ * Must be called before any runner dispatch. When not called, all kclibs are allowed.
+ * @param whitelist Comma-separated kclib names, or NULL/empty for all allowed.
  * @return None.
  */
-static void load_whitelist_from_manifest(JNIEnv *env) {
-    jclass activity_thread_cls;
-    jmethodID current_activity_thread;
-    jobject activity_thread;
-    jmethodID get_application;
-    jobject application;
-    jclass context_cls;
-    jmethodID get_package_name;
-    jstring package_name;
-    jmethodID get_application_info;
-    jobject app_info;
-    jclass app_info_cls;
-    jfieldID meta_data_field;
-    jobject meta_data;
-    jclass bundle_cls;
-    jmethodID get_string;
-    jstring key;
-    jstring value;
-    const char *raw;
-
+static void set_whitelist(const char *whitelist) {
     if (g_whitelist_loaded) {
         return;
     }
-
     g_whitelist_loaded = 1;
-
-    activity_thread_cls = (*env)->FindClass(env, "android/app/ActivityThread");
-    if (!activity_thread_cls) {
-        return;
-    }
-
-    current_activity_thread = (*env)->GetStaticMethodID(env,
-        activity_thread_cls, "currentActivityThread",
-        "()Landroid/app/ActivityThread;");
-    if (!current_activity_thread) {
-        return;
-    }
-
-    activity_thread = (*env)->CallStaticObjectMethod(env,
-        activity_thread_cls, current_activity_thread);
-    if (!activity_thread) {
-        return;
-    }
-
-    get_application = (*env)->GetMethodID(env,
-        activity_thread_cls, "getApplication",
-        "()Landroid/app/Application;");
-    if (!get_application) {
-        return;
-    }
-
-    application = (*env)->CallObjectMethod(env,
-        activity_thread, get_application);
-    if (!application) {
-        return;
-    }
-
-    context_cls = (*env)->FindClass(env, "android/content/Context");
-    if (!context_cls) {
-        return;
-    }
-
-    get_package_name = (*env)->GetMethodID(env,
-        context_cls, "getPackageName",
-        "()Ljava/lang/String;");
-    if (!get_package_name) {
-        return;
-    }
-
-    package_name = (*env)->CallObjectMethod(env,
-        application, get_package_name);
-    if (!package_name) {
-        return;
-    }
-
-    get_application_info = (*env)->GetMethodID(env,
-        context_cls, "getApplicationInfo",
-        "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;");
-    if (!get_application_info) {
-        return;
-    }
-
-    app_info = (*env)->CallObjectMethod(env,
-        application, get_application_info, package_name, 128);
-    if (!app_info) {
-        return;
-    }
-
-    app_info_cls = (*env)->FindClass(env,
-        "android/content/pm/ApplicationInfo");
-    if (!app_info_cls) {
-        return;
-    }
-
-    meta_data_field = (*env)->GetFieldID(env,
-        app_info_cls, "metaData", "Landroid/os/Bundle;");
-    if (!meta_data_field) {
-        return;
-    }
-
-    meta_data = (*env)->GetObjectField(env, app_info, meta_data_field);
-    if (!meta_data) {
-        return;
-    }
-
-    bundle_cls = (*env)->FindClass(env, "android/os/Bundle");
-    if (!bundle_cls) {
-        return;
-    }
-
-    get_string = (*env)->GetMethodID(env,
-        bundle_cls, "getString",
-        "(Ljava/lang/String;)Ljava/lang/String;");
-    if (!get_string) {
-        return;
-    }
-
-    key = (*env)->NewStringUTF(env, KCJNI_MANIFEST_KEY);
-    if (!key) {
-        return;
-    }
-
-    value = (*env)->CallObjectMethod(env, meta_data, get_string, key);
-    if (!value) {
-        return;
-    }
-
-    raw = (*env)->GetStringUTFChars(env, value, NULL);
-    if (raw) {
-        parse_allowed_kclibs(raw);
-        (*env)->ReleaseStringUTFChars(env, value, raw);
+    if (whitelist && whitelist[0]) {
+        parse_allowed_kclibs(whitelist);
     }
 }
 
@@ -420,6 +298,22 @@ static char *kcjni_wrap_response(int ok, const char *body) {
  * @param args_json JSON payload with "lib", "cmd", and "args".
  * @return Structured JSON response string.
  */
+
+JNIEXPORT void JNICALL kcjni_native_set_whitelist(JNIEnv *env, jclass cls,
+    jstring whitelist) {
+    const char *raw;
+    (void)cls;
+    if (whitelist == NULL) {
+        set_whitelist(NULL);
+        return;
+    }
+    raw = (*env)->GetStringUTFChars(env, whitelist, NULL);
+    if (raw) {
+        set_whitelist(raw);
+        (*env)->ReleaseStringUTFChars(env, whitelist, raw);
+    }
+}
+
 JNIEXPORT jstring JNICALL kcjni_native_run(JNIEnv *env, jclass cls,
     jstring args_json) {
     const char *json = NULL;
@@ -439,8 +333,6 @@ JNIEXPORT jstring JNICALL kcjni_native_run(JNIEnv *env, jclass cls,
     (void)cls;
 
     err[0] = '\0';
-
-    load_whitelist_from_manifest(env);
 
     if (args_json == NULL) {
         snprintf(err, sizeof err, "missing argsJson");
@@ -557,11 +449,9 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         return JNI_ERR;
     }
 
-    if ((*env)->RegisterNatives(env, cls, methods, 1) != JNI_OK) {
+    if ((*env)->RegisterNatives(env, cls, methods, 2) != JNI_OK) {
         return JNI_ERR;
     }
-
-    load_whitelist_from_manifest(env);
 
     return JNI_VERSION_1_6;
 }
